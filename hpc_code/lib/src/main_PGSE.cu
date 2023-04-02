@@ -30,13 +30,16 @@
 #include <thrust/device_vector.h>
 #include <thrust/copy.h>
 
+#include "Simparams.h"
+#include "save_results.h"
+
 using namespace std;
 
-#define Pi 3.14159265
-#define timepoints 1000
-#define Ngrad_max 2000
-#define nite 4
-#define Nc_max 3
+const double Pi = 3.14159265;
+const int timepoints = 1000;
+const int Ngrad_max = 2000;
+const int nite = 4;
+const int Nc_max = 3;
 
 // ********** cuda kernel **********
 __device__ double atomAdd(double *address, double val)
@@ -388,7 +391,7 @@ __global__ void propagate(curandStatePhilox4_32_10_t *state, double *sig0, doubl
             //            }
             //            flipx0=false; flipx1=false; flipy0=false; flipy1=false; flipz0=false; flipz1=false;
 
-            // cy, real 
+            // cy, real
             dx = (xt[0] - xi[0]) * res;
             dy = (xt[1] - xi[1]) * res;
             dz = (xt[2] - xi[2]) * res;
@@ -474,41 +477,12 @@ __global__ void propagate(curandStatePhilox4_32_10_t *state, double *sig0, doubl
 }
 
 // cy, refactor the code.
-struct SimulationParameters
-{
-    double dt;         // Time step in ms
-    int TN;            // # time steps
-    int NPar;          // # particles
-    int Nbvec;         // # gradient directions
-    int Nc;            // # compartments
-    double res;        // voxel size
-    int NPix1, NPix2, NPix3; // medium matrix dimension
-};
 
-SimulationParameters LoadSimulationParameters(const std::string &filename)
-{
-    SimulationParameters params;
-    std::ifstream file(filename);
-    file >> params.dt >> params.TN >> params.NPar >> params.Nbvec >>
-        params.Nc >> params.res >> params.NPix1 >> params.NPix2 >> params.NPix3;
-    return params;
-}
-
-thrust::host_vector<double>LoadVectorFromFile(const std::string &filename)
-{
-    thrust::host_vector<double>vector;
-    std::ifstream file(filename);
-    double value;
-    while (file >> value)
-    {
-        vector.push_back(value);
-    }
-    return vector;
-}
 //********** Define tissue parameters **********
 
 int main(int argc, char *argv[])
 {
+    cudaSetDevice(6);
     clock_t begin = clock();
     clock_t end = clock();
 
@@ -520,19 +494,20 @@ int main(int argc, char *argv[])
         std::cout << "diffusivity=" << d << std::endl;
     }
 
-    int i = 0, j = 0;
-    thrust::host_vector<double> T2(sim_params.Nc);
-    ifstream myfile0T2("T2.txt", ios::in);
-    for (i = 0; i < sim_params.Nc; i++)
-    {
-        myfile0T2 >> T2[i];
-        T2[i] /= sim_params.dt;
-        //            cout<<"T2="<<T2[i]<<endl;
-    }
-    myfile0T2.close();
+    // load_pgse_params();
 
-    thrust::host_vector<double>step(sim_params.Nc);
+    auto T2_real = LoadVectorFromFile("T2.txt");
+    auto T2{T2_real};
+    for (auto &a : T2)
+    {
+        // change the real T2 to unreal but unit(?can fit to unit box) T2
+        a /= sim_params.dt;
+        // std::cout << a << std::endl;
+    }
+
+    thrust::host_vector<double> step(sim_params.Nc);
     for (int i = 0; i < sim_params.Nc; ++i)
+    // for(auto &a: step)
     {
         // cy, no the real step size, the unit (or normalization) step size in voxel box
         // cy, dt, D, and res is realistic.
@@ -540,9 +515,7 @@ int main(int argc, char *argv[])
         std::cout << "step size=" << step[i] << std::endl;
     }
 
-    thrust::host_vector<double>Pij(sim_params.Nc * sim_params.Nc);
-        // Define index number
-
+    thrust::host_vector<double> Pij(sim_params.Nc * sim_params.Nc);
     int k = 0;
     for (int i = 0; i < sim_params.Nc; ++i)
     {
@@ -568,7 +541,7 @@ int main(int argc, char *argv[])
     // Pixelized matrix A for the fiber
     thrust::host_vector<int> APix(sim_params.NPix1 * sim_params.NPix2 * sim_params.NPix3);
     ifstream myfile1("fiber.txt", ios::in);
-    for (i = 0; i < sim_params.NPix1 * sim_params.NPix2 * sim_params.NPix3; i++)
+    for (int i = 0; i < sim_params.NPix1 * sim_params.NPix2 * sim_params.NPix3; i++)
     {
         myfile1 >> APix[i];
     }
@@ -581,34 +554,7 @@ int main(int argc, char *argv[])
     myfile2.close();
 
     // Gradient parameters of PGSE: Delta, delta, |g|, gx, gy, gz
-    thrust::host_vector<double> grad(Ngrad * 6);
-    ifstream myfile3("gradient_time.txt", ios::in);
-    for (i = 0; i < Ngrad * 6; i++)
-    {
-        myfile3 >> grad[i];
-    }
-    myfile3.close();
-
-    //        // b-value
-    //        thrust::host_vector<double> bval(Nbvec);
-    //        ifstream myfile2 ("bval.txt", ios::in);
-    //        for (i=0; i<Nbvec; i++){
-    //            myfile2>>bval[i];
-    //        }
-    //        myfile2.close();
-    //
-    //        // b-vector
-    //        thrust::host_vector<double> bvec(Nbvec*3);
-    //        ifstream myfile3 ("bvec.txt", ios::in);
-    //        for (i=0; i<Nbvec; i++){
-    //            myfile3>>bvec[i*3+0]; myfile3>>bvec[i*3+1]; myfile3>>bvec[i*3+2];
-    //        }
-    //        myfile3.close();
-
-    //        thrust::host_vector<double> TD(timepoints);
-    //        for (i=0; i<timepoints; i++){
-    //        TD[i]=(i*(TN/timepoints)+1)*dt;
-    //        }
+    const auto grad = LoadVectorFromFile("gradient_time.txt");
 
     // ********** Simulate diffusion **********
 
@@ -633,46 +579,20 @@ int main(int argc, char *argv[])
     thrust::host_vector<double> dx2(timepoints * 6);
     thrust::host_vector<double> dx4(timepoints * 15);
     thrust::host_vector<double> sig(Ngrad);
-    //        thrust::host_vector<double> sigRe(timepoints*Nbvec);
-    //        thrust::host_vector<double> sigIm(timepoints*Nbvec);
     thrust::host_vector<double> NPar_count(timepoints * sim_params.Nc);
-    for (i = 0; i < timepoints; i++)
-    {
-        sig0[i] = 0;
-    }
-    for (i = 0; i < timepoints * 6; i++)
-    {
-        dx2[i] = 0;
-    }
-    for (i = 0; i < timepoints * 15; i++)
-    {
-        dx4[i] = 0;
-    }
-    for (i = 0; i < Ngrad; i++)
-    {
-        sig[i] = 0;
-    }
-    //        for (i=0;i<timepoints*Nbvec;i++){ sigRe[i]=0; }
-    for (i = 0; i < timepoints * sim_params.Nc; i++)
-    {
-        NPar_count[i] = 0;
-    }
+
 
     // Move data from host to device
     thrust::device_vector<double> d_sig0 = sig0;
     thrust::device_vector<double> d_dx2 = dx2;
     thrust::device_vector<double> d_dx4 = dx4;
     thrust::device_vector<double> d_sig = sig;
-    thrust::device_vector<double> d_grad = grad;
-    //        thrust::device_vector<double> d_sigRe=sigRe;
-    //        thrust::device_vector<double> d_sigIm=sigIm;
     thrust::device_vector<double> d_NPar_count = NPar_count;
-    //        thrust::device_vector<double> d_TD=TD;
+    
+    thrust::device_vector<double> d_grad = grad;
     thrust::device_vector<double> d_step = step;
     thrust::device_vector<double> d_T2 = T2;
     thrust::device_vector<double> d_Pij = Pij;
-    //        thrust::device_vector<double> d_bval=bval;
-    //        thrust::device_vector<double> d_bvec=bvec;
     thrust::device_vector<int> d_APix = APix;
     int *ptr = thrust::raw_pointer_cast(&d_APix[0]);
 
@@ -696,97 +616,12 @@ int main(int argc, char *argv[])
     //        thrust::copy(d_sigIm.begin(), d_sigIm.end(), sigIm.begin());
     thrust::copy(d_NPar_count.begin(), d_NPar_count.end(), NPar_count.begin());
 
-    // Save results
-    ofstream fs0out("sig0.txt");
-    ofstream fdx2out("dx2.txt");
-    ofstream fdx4out("dx4.txt");
-    ofstream fsigout("sig.txt");
-    //        ofstream fsRout("sigRe.txt");
-    //        ofstream fsIout("sigIm.txt");
-    ofstream fNpout("NPar_count.txt");
-    fs0out.precision(15);
-    fdx2out.precision(15);
-    fdx4out.precision(15);
-    fsigout.precision(15);
-    //        fsRout.precision(15);
-    //        fsIout.precision(15);
-    for (i = 0; i < timepoints; i++)
-    {
-        fs0out << sig0[i] << endl;
-        for (j = 0; j < 6; j++)
-        {
-            if (j == 5)
-            {
-                fdx2out << dx2[i * 6 + j] << endl;
-            }
-            else
-            {
-                fdx2out << dx2[i * 6 + j] << "\t";
-            }
-        }
-        for (j = 0; j < 15; j++)
-        {
-            if (j == 14)
-            {
-                fdx4out << dx4[i * 15 + j] << endl;
-            }
-            else
-            {
-                fdx4out << dx4[i * 15 + j] << "\t";
-            }
-        }
-
-        //            for (j=0; j<Nbvec; j++) {
-        //                if (j==Nbvec-1) {
-        //                    fsRout<<sigRe[i*Nbvec+j]<<endl;
-        ////                    fsIout<<sigIm[i*Nbvec+j]<<endl;
-        //                }
-        //                else {
-        //                    fsRout<<sigRe[i*Nbvec+j]<<"\t";
-        ////                    fsIout<<sigIm[i*Nbvec+j]<<"\t";
-        //                }
-        //            }
-
-        for (j = 0; j < sim_params.Nc; j++)
-        {
-            if (j == sim_params.Nc - 1)
-            {
-                fNpout << NPar_count[i * sim_params.Nc + j] << endl;
-            }
-            else
-            {
-                fNpout << NPar_count[i * sim_params.Nc + j] << "\t";
-            }
-        }
-    }
-
-    for (i = 0; i < Ngrad; i++)
-    {
-        fsigout << sig[i] << endl;
-    }
-
-    fdx2out.close();
-    fdx4out.close();
-    fsigout.close();
-    //        fsRout.close();
-    //        fsIout.close();
-    fNpout.close();
-
-    ofstream paraout("sim_para.txt");
-    paraout << sim_params.dt << endl
-            << sim_params.TN << endl
-            << sim_params.NPar << endl;
-    paraout << sim_params.res << endl;
-    paraout.close();
-
-    ofstream TDout("diff_time.txt");
-    for (i = 0; i < timepoints; i++)
-    {
-        TDout << (i * (sim_params.TN / timepoints) + 1) * sim_params.dt << endl;
-    }
-    TDout.close();
-
-    //        ofstream NParout("NPar_count.txt");
-    //        NParout<<NPar_count[0];
-    //        NParout.close();
+    save_results(timepoints,
+                 sig0,
+                 dx2,
+                 dx4,
+                 sig,
+                 NPar_count,
+                 Ngrad,
+                 sim_params);
 }

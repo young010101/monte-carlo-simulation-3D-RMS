@@ -13,37 +13,50 @@ endif
 
 ALL_CCFLAGS :=
 ALL_CCFLAGS += $(NVCCFLAGS)
-ALL_CCFLAGS += --std=c++14
+ALL_CCFLAGS += --std=c++14 -Iinclude
+
+
+SRCS := src/Simparams.cpp src/main_PGSE.cu src/save_results.cu
+OBGS := $(SRCS:%.cpp=%.o)
+OBGS := $(OBGS:%.cu=%.o)
+BINS := $(SRCS:%.cpp=%) $(SRCS:%.cu=%)
+
+
+
+TARGET = sim_PGSE
 
 ECHOORNO=0
 
 # Target rules
 all: build
 
-build: sim_PGSE
+build: $(TARGET)
 
 check.deps:
 ifeq ($(ECHOORNO), 0)
-	@echo "Sample will be waived due to the above missing dependencies"
+	@echo $(OBGS)
 else
 	@echo "Sample is ready - all dependencies have been met"
 endif
 
-sim_PGSE.o:main_PGSE.cu
-	$(EXEC) $(NVCC) $(ALL_CCFLAGS) -o $@ -c $<
+%.o:%.cu
+	$(NVCC) $(ALL_CCFLAGS) -o $@ -c $<
 
-sim_PGSE: sim_PGSE.o
-	$(EXEC) $(NVCC) $(ALL_LDFLAGS) -o $@ $+
-	$(EXEC) mkdir -p ../../../bin/$(BUILD_TYPE)
-	$(EXEC) cp $@ ../../../bin/$(BUILD_TYPE)
+%.o:%.cpp
+	$(NVCC) $(ALL_CCFLAGS) -o $@ -c $<
+
+$(TARGET): $(OBGS)
+	$(NVCC) $(ALL_LDFLAGS) -o $@ $+
+	mkdir -p ../../../bin/$(BUILD_TYPE)
+	cp $@ ../../../bin/$(BUILD_TYPE)
 
 run: build
-	$(EXEC) ./sim_PGSE
+	./$(TARGET)
 
 testrun: build
 
 clean:
-	rm -f sim_PGSE sim_PGSE.o
-	rm -rf ../../../bin/$(BUILD_TYPE)/sim_PGSE
+	rm -f $(TARGET) $(OBGS)
+	rm -rf ../../../bin/$(BUILD_TYPE)/$(TARGET)
 
 clobber: clean
