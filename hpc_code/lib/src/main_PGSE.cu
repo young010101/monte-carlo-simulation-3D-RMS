@@ -30,8 +30,10 @@
 #include <thrust/device_vector.h>
 #include <thrust/copy.h>
 
+#include <assert.h>
 #include "Simparams.h"
 #include "save_results.h"
+#include "sig_gen.h"
 
 using namespace std;
 
@@ -67,13 +69,26 @@ __global__ void setup_kernel(curandStatePhilox4_32_10_t *state, unsigned long se
     curand_init(seed, idx, 0, &state[idx]);
 }
 
-__global__ void propagate(curandStatePhilox4_32_10_t *state, double *sig0, double *dx2, double *dx4, double *sig, double *NPar_count, const int TN, const int NPar, const int Nc, const double res, const double dt, const double *step, const int NPix1, const int NPix2, const int NPix3, const int Ngrad, const double *grad, const double *T2, const double *Pij, const int *APix)
+__device__ void sig_gen(double *xt, double *xi, const double &res,
+                        const int &Ngrad, const double &dt, const double *grad,
+                        const int &TN, const int &Nc, double *t, const double *T2,
+                        int &i,
+                        double *sig, const int &ai, double *sig0,
+                        double *NPar_count, double *dx2, double *dx4,
+                        const int Tstep, const int tidx, const int nidx, const double s0, double *phase, 
+                        const double dx, const double dy, const double dz);
+
+__global__ void propagate(curandStatePhilox4_32_10_t *state, double *sig0, double *dx2, double *dx4, double *sig,
+                          double *NPar_count, const int TN, const int NPar, const int Nc,
+                          const double res, const double dt, const double *step,
+                          const int NPix1, const int NPix2, const int NPix3, const int Ngrad, const double *grad,
+                          const double *T2, const double *Pij, const int *APix)
 {
     int idx = threadIdx.x + blockDim.x * blockIdx.x;
     int stride = blockDim.x * gridDim.x;
     curandStatePhilox4_32_10_t localstate = state[idx];
 
-    int Tstep = TN / timepoints;
+    const int Tstep = TN / timepoints;
 
     for (int k = idx; k < NPar; k += stride)
     {
@@ -391,6 +406,7 @@ __global__ void propagate(curandStatePhilox4_32_10_t *state, double *sig0, doubl
             //            }
             //            flipx0=false; flipx1=false; flipy0=false; flipy1=false; flipz0=false; flipz1=false;
 
+            // cy, signal generation
             // cy, real
             dx = (xt[0] - xi[0]) * res;
             dy = (xt[1] - xi[1]) * res;
@@ -465,17 +481,47 @@ __global__ void propagate(curandStatePhilox4_32_10_t *state, double *sig0, doubl
                 atomAdd(&dx4[15 * tidx + 13], s0 * dy * dz * dz * dz);
                 atomAdd(&dx4[15 * tidx + 14], s0 * dz * dz * dz * dz);
 
-                //                for (int j=0; j<Nbvec; j++) {
-                //                    qx= sqrt( bval[j] / TD[tidx] ) *(dx*bvec[j*3+0]+dy*bvec[j*3+1]+dz*bvec[j*3+2]);
-                //                    atomAdd(&sigRe[Nbvec*tidx+j],s0*cos(qx));
-                ////                    atomAdd(&sigIm[Nbvec*tidx+j],-s0*sin(qx));
-                //                }
+                sig_gen(xt, xi, res,
+                        Ngrad, dt, grad,
+                        TN, Nc, t, T2,
+                        i,
+                        sig, ai, sig0,
+                        NPar_count, dx2, dx4,
+                        Tstep, tidx, nidx, s0, phase,
+                        dx, dy, dz);
             }
         }
+        state[idx] = localstate;
     }
-    state[idx] = localstate;
 }
+__device__ void sig_gen(double *xt, double *xi, const double &res,
+                        const int &Ngrad, const double &dt, const double *grad,
+                        const int &TN, const int &Nc, double *t, const double *T2,
+                        int &i,
+                        double *sig, const int &ai, double *sig0,
+                        double *NPar_count, double *dx2, double *dx4,
+                        const int Tstep, int tidx, int nidx, double s0, double *phase, 
+                        double dx, double dy, double dz)
+{
+    // int Tstep = TN / timepoints;
 
+    // int tidx = 0, nidx = 0;
+
+    // // Signal weighted by T2 relaxation
+    // double s0 = 0;
+
+    // // q=\gamma * g * \delta (1/�m)
+    // double phase[Ngrad_max] = {0};
+    // double dx = 0, dy = 0, dz = 0;
+
+
+
+    //                for (int j=0; j<Nbvec; j++) {
+    //                    qx= sqrt( bval[j] / TD[tidx] ) *(dx*bvec[j*3+0]+dy*bvec[j*3+1]+dz*bvec[j*3+2]);
+    //                    atomAdd(&sigRe[Nbvec*tidx+j],s0*cos(qx));
+    ////                    atomAdd(&sigIm[Nbvec*tidx+j],-s0*sin(qx));
+    //                }
+}
 // cy, refactor the code.
 
 //********** Define tissue parameters **********
@@ -483,69 +529,32 @@ __global__ void propagate(curandStatePhilox4_32_10_t *state, double *sig0, doubl
 int main(int argc, char *argv[])
 {
     cudaSetDevice(6);
-    clock_t begin = clock();
-    clock_t end = clock();
 
     const auto sim_params = LoadSimulationParameters("simParamInput.txt");
 
     const auto D = LoadVectorFromFile("diffusivity.txt");
     for (const auto &d : D)
     {
-        std::cout << "diffusivity=" << d << std::endl;
+        std::cout << "Compartment "<<"(index)" << "'s diffusivity=" << d << "um^2/s" << std::endl;
     }
 
     // load_pgse_params();
 
-    auto T2_real = LoadVectorFromFile("T2.txt");
-    auto T2{T2_real};
-    for (auto &a : T2)
-    {
-        // change the real T2 to unreal but unit(?can fit to unit box) T2
-        a /= sim_params.dt;
-        // std::cout << a << std::endl;
-    }
-
-    thrust::host_vector<double> step(sim_params.Nc);
-    for (int i = 0; i < sim_params.Nc; ++i)
-    // for(auto &a: step)
-    {
-        // cy, no the real step size, the unit (or normalization) step size in voxel box
-        // cy, dt, D, and res is realistic.
-        step[i] = sqrt(6.0 * sim_params.dt * D[i]) / sim_params.res;
-        std::cout << "step size=" << step[i] << std::endl;
-    }
-
-    thrust::host_vector<double> Pij(sim_params.Nc * sim_params.Nc);
-    int k = 0;
-    for (int i = 0; i < sim_params.Nc; ++i)
-    {
-        for (int j = 0; j < sim_params.Nc; ++j)
-        {
-            if ((i == 0) || (j == 0))
-            {
-                Pij[k] = 0.0;
-            }
-            else if (i == j)
-            {
-                Pij[k] = 1.0;
-            }
-            else
-            {
-                Pij[k] = std::min(1.0, sqrt(D[j] / D[i]));
-            }
-            std::cout << k << " permeation probability=" << Pij[k] << std::endl;
-            ++k;
-        }
-    }
+    const auto T2_real = LoadVectorFromFile("T2.txt");
+    const auto compute_params = load_compute_params(T2_real, sim_params, D);
 
     // Pixelized matrix A for the fiber
-    thrust::host_vector<int> APix(sim_params.NPix1 * sim_params.NPix2 * sim_params.NPix3);
-    ifstream myfile1("fiber.txt", ios::in);
-    for (int i = 0; i < sim_params.NPix1 * sim_params.NPix2 * sim_params.NPix3; i++)
-    {
-        myfile1 >> APix[i];
-    }
-    myfile1.close();
+    // thrust::host_vector<int> APix(sim_params.NPix1 * sim_params.NPix2 * sim_params.NPix3);
+    // ifstream myfile1("fiber.txt", ios::in);
+    // for (int i = 0; i < sim_params.NPix1 * sim_params.NPix2 * sim_params.NPix3; i++)
+    // {
+    //     myfile1 >> APix[i];
+    // }
+    // myfile1.close();
+
+    // cy, lookup table, to-do, add dimension wise
+    const auto APix = LoadVectorFromFile("fiber.txt");
+    // std::cout << APix.size() << std::endl;
 
     // Number of PGSE settings
     int Ngrad = 0;
@@ -554,7 +563,10 @@ int main(int argc, char *argv[])
     myfile2.close();
 
     // Gradient parameters of PGSE: Delta, delta, |g|, gx, gy, gz
-    const auto grad = LoadVectorFromFile("gradient_time.txt");
+    auto grad = LoadVectorFromFile("gradient_time.txt");
+    grad.erase(grad.begin()+18,grad.end());
+    assert(grad.size()%6 == 0);
+    Ngrad = grad.size()/6;
 
     // ********** Simulate diffusion **********
 
@@ -566,10 +578,10 @@ int main(int argc, char *argv[])
     fclose(urandom);
 
     // Initialize state of RNG
-    int blockSize = 128;
+    int blockSize = 64;
     int numBlocks = (sim_params.NPar + blockSize - 1) / blockSize;
-    cout << numBlocks << endl
-         << blockSize << endl;
+    cout << "numBlocks: " << numBlocks << endl
+         << "blockSize: " << blockSize << endl;
 
     thrust::device_vector<curandStatePhilox4_32_10_t> devState(numBlocks * blockSize);
     setup_kernel<<<numBlocks, blockSize>>>(devState.data().get(), seed);
@@ -581,23 +593,24 @@ int main(int argc, char *argv[])
     thrust::host_vector<double> sig(Ngrad);
     thrust::host_vector<double> NPar_count(timepoints * sim_params.Nc);
 
-
     // Move data from host to device
     thrust::device_vector<double> d_sig0 = sig0;
     thrust::device_vector<double> d_dx2 = dx2;
     thrust::device_vector<double> d_dx4 = dx4;
     thrust::device_vector<double> d_sig = sig;
     thrust::device_vector<double> d_NPar_count = NPar_count;
-    
+
     thrust::device_vector<double> d_grad = grad;
-    thrust::device_vector<double> d_step = step;
-    thrust::device_vector<double> d_T2 = T2;
-    thrust::device_vector<double> d_Pij = Pij;
+    thrust::device_vector<double> d_step = compute_params.step;
+    thrust::device_vector<double> d_T2 = compute_params.T2;
+    thrust::device_vector<double> d_Pij = compute_params.Pij;
     thrust::device_vector<int> d_APix = APix;
     int *ptr = thrust::raw_pointer_cast(&d_APix[0]);
 
     //        double *NPar_count; cudaMallocManaged(&NPar_count,sizeof(double)); NPar_count[0] = 0;
     // Parallel computation
+    clock_t begin = clock();
+    clock_t end = clock();
     begin = clock();
     propagate<<<numBlocks, blockSize>>>(devState.data().get(),
                                         d_sig0.data().get(), d_dx2.data().get(), d_dx4.data().get(), d_sig.data().get(),
@@ -606,14 +619,12 @@ int main(int argc, char *argv[])
                                         sim_params.NPix1, sim_params.NPix2, sim_params.NPix3, Ngrad, d_grad.data().get(), d_T2.data().get(), d_Pij.data().get(), ptr);
     cudaDeviceSynchronize();
     end = clock();
-    cout << "Done! Elpased time " << double((end - begin) / CLOCKS_PER_SEC) << " s" << endl;
+    cout << "Done! Elpased time " << double((end - begin) / CLOCKS_PER_SEC) << " s." << endl;
 
     thrust::copy(d_sig0.begin(), d_sig0.end(), sig0.begin());
     thrust::copy(d_dx2.begin(), d_dx2.end(), dx2.begin());
     thrust::copy(d_dx4.begin(), d_dx4.end(), dx4.begin());
     thrust::copy(d_sig.begin(), d_sig.end(), sig.begin());
-    //        thrust::copy(d_sigRe.begin(), d_sigRe.end(), sigRe.begin());
-    //        thrust::copy(d_sigIm.begin(), d_sigIm.end(), sigIm.begin());
     thrust::copy(d_NPar_count.begin(), d_NPar_count.end(), NPar_count.begin());
 
     save_results(timepoints,
@@ -624,4 +635,33 @@ int main(int argc, char *argv[])
                  NPar_count,
                  Ngrad,
                  sim_params);
+
+    cout << "=============================================" << std::endl;
+    cout << "Tissue parameters: " << std::endl;
+    cout << "--------------------------------------------"<< std::endl;
+    cout << "Tissue geometry: " 
+        << sim_params.NPix1*sim_params.res
+        <<'*'<< sim_params.NPix2*sim_params.res 
+        <<'*'<< sim_params.NPix3*sim_params.res << " um" << std::endl;
+    cout << "Number of conpartment: " << sim_params.Nc << std::endl;
+    cout << "Diffusive of each compartment: " << "D_C3= " << D[2] << " um^2/ms" << std::endl;
+    cout << "T2 of each compartment: "<< T2_real[2] <<" ms, T2 in iteration: " << compute_params.T2[2] << std::endl;
+
+    cout << "=============================================" << std::endl;
+    cout << "PGSE"<< std::endl;
+    cout << "--------------------------------------------"<< std::endl;
+    std::cout << "Number of gradient: " << Ngrad << std::endl;
+    std::cout << "Diffusion time Delta: " << grad[0] << " ms" << std::endl;
+    std::cout << "Pulse time delta: " << grad[1]  << " ms" << std::endl;
+    std::cout << "Gradient amptitude: " << grad[2]  << " /(um*ms)" << std::endl;
+    cout << "=============================================" << std::endl;
+    cout << "Simulation experiment parameter: " << std::endl;
+    cout << "--------------------------------------------"<< std::endl;
+    cout << "Number of random walkers: "<< sim_params.NPar << std::endl; // cy, check again.
+    cout << "Step size of each compartment: "<<  compute_params.step[2]*sim_params.res
+        << " um (<resolution 0.1 um), Size in iteration: "<<  compute_params.step[2] << " (depend on diffusivity)" << std::endl;
+    cout << "Time of each step: " << sim_params.dt << " ms" << std::endl;
+    cout << "Total time of simulation: " << sim_params.dt*sim_params.TN << " ms, "
+        << "Iteration number: " << sim_params.TN << std::endl;
+    cout << "Sample number: " << timepoints << std::endl;
 }
